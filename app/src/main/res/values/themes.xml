@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Serene Calm Theme - Calming, friendly, and modern -->
+    <style name="Theme.VisionAId" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Ensure the app does NOT draw under system bars -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:fitsSystemWindows">true</item>
+
+        <!-- Status bar styling - soft charcoal for cohesive look -->
+        <item name="android:statusBarColor">#0F1419</item>
+        <item name="android:windowLightStatusBar">false</item>
+
+        <!-- Navigation bar styling - matching soft charcoal -->
+        <item name="android:navigationBarColor">#0F1419</item>
+        <item name="android:windowLightNavigationBar">false</item>
+
+        <!-- System splash screen - match app dark background -->
+        <item name="android:windowSplashScreenBackground">#0F1419</item>
+        <item name="android:windowSplashScreenAnimationDuration">0</item>
+    </style>
+</resources>

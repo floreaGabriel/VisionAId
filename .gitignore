@@ -1,0 +1,93 @@
+*.iml
+.gradle
+/local.properties
+/.idea/caches
+/.idea/libraries
+/.idea/modules.xml
+/.idea/workspace.xml
+/.idea/navEditor.xml
+/.idea/assetWizardSettings.xml
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# ML Models - Large files (use Git LFS or external storage)
+*.tflite
+*.onnx
+*.onnx.data
+*.pth
+*.h5
+*.pb
+*.mlmodel
+*.caffemodel
+*.weights
+*.pt
+
+# Depth Anything V2 specific
+Depth-Anything-V2/**/*.pth
+Depth-Anything-V2/**/*.onnx
+Depth-Anything-V2/depth_env/
+Depth-Anything-V2/**/__pycache__/
+Depth-Anything-V2/**/*.pyc
+
+# LaTeX auxiliary files
+*.aux
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.pdf
+
+# Python Environments & Cache (Added by Antigravity)
+**/__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+.env
+.ipynb_checkpoints
+scripts/test_env_py11/
+scripts/testing_env/
+depth_optimization/.venv/
+
+# Android Standard
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+bin/
+gen/
+local.properties
+
+# Scripts & temporary images
+scripts/debug_registration_images/
+debug_registration_images/
+
+# Local IDE / tooling state
+.claude/settings.local.json
+.idea/.name
+
+# Training output dumps
+scripts/money_train/output_train/
+
+# Stray asset duplicates at repo root
+/vision_ai.png
+/vision_ai_logo.png
+
+# Generated / temporary docs
+docs/output.tex
+CERC_FLOREA_*.docx
+
+# Large media files (not needed in repo)
+*.gif
+*.mp4
+*.mov
+*.avi
+docs/referat_final/imagini/GIF*
+docs/referat_final/imagini/MPEG*

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Serene Calm Theme Colors -->
+    <color name="teal_primary">#FF0D9488</color>
+    <color name="teal_light">#FF14B8A6</color>
+    <color name="teal_dark">#FF0F766E</color>
+    <color name="soft_green">#FF22C55E</color>
+    <color name="soft_amber">#FFFBBF24</color>
+    <color name="soft_coral">#FFF87171</color>
+    <color name="cream_background">#FFFEF9F3</color>
+    <color name="sky_blue">#FF38BDF8</color>
+    <color name="mint">#FF99F6E4</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>

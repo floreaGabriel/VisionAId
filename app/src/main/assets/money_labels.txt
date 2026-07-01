@@ -1,0 +1,8 @@
+100_ron
+10_ron
+1_ron
+200_ron
+20_ron
+500_ron
+50_ron
+5_ron

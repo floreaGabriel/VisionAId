@@ -2,6 +2,8 @@
 
 **An offline-first, multimodal Android assistant for people with visual impairment.**
 
+📄 **Paper:** [arXiv:2607.02371](https://arxiv.org/abs/2607.02371) [cs.CV]
+
 VisionAId turns a commodity Android smartphone into a real-time visual assistant.
 It integrates six on-device deep-learning models (metric monocular depth, instance
 segmentation, visual and facial embeddings, face detection, and a custom banknote
@@ -128,7 +130,22 @@ Released for academic and research purposes. See the repository for details.
 
 ## 🎓 Citation
 
-If you use this work, please cite the accompanying paper:
+If you use this work, please cite the accompanying paper
+([arXiv:2607.02371](https://arxiv.org/abs/2607.02371)):
 
-> C.-G. Florea, *VisionAId: An Offline-First Multimodal Android Assistant for
-> People with Visual Impairment, Featuring Personalized Object Retrieval*, 2026.
+> C.-G. Florea and S. Spînu, *VisionAId: An Offline-First Multimodal Android
+> Assistant for People with Visual Impairment, Featuring Personalized Object
+> Retrieval*, arXiv:2607.02371 [cs.CV], 2026.
+
+```bibtex
+@misc{florea2026visionaid,
+  title         = {VisionAId: An Offline-First Multimodal Android Assistant for
+                   People with Visual Impairment, Featuring Personalized Object Retrieval},
+  author        = {Florea, Cristian-Gabriel and Sp{\^i}nu, Stelian},
+  year          = {2026},
+  eprint        = {2607.02371},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.CV},
+  url           = {https://arxiv.org/abs/2607.02371}
+}
+```

@@ -5,10 +5,14 @@ import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.util.Log
 import java.nio.FloatBuffer
 import java.util.Collections
 import kotlin.math.exp
+import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -18,8 +22,11 @@ class FaceDetector(private val context: Context) {
         private const val TAG = "FaceDetector"
         private const val MODEL_FILE = "face_detection_yunet_2023mar.onnx"
         private const val INPUT_SIZE = 640
-        private const val CONFIDENCE_THRESHOLD = 0.5f
+        // Score = sqrt(cls * obj), same scale as OpenCV FaceDetectorYN
+        private const val CONFIDENCE_THRESHOLD = 0.6f
         private const val IOU_THRESHOLD = 0.3f
+        // Minimum face size in original bitmap pixels
+        private const val MIN_FACE_SIZE = 12f
 
         private val STRIDES = intArrayOf(8, 16, 32)
     }
@@ -57,30 +64,34 @@ class FaceDetector(private val context: Context) {
             val session = ortSession ?: return@withContext emptyList()
 
             try {
-                // Direct resize to 640x640 (no letterbox padding)
-                val scaleX = INPUT_SIZE.toFloat() / bitmap.width
-                val scaleY = INPUT_SIZE.toFloat() / bitmap.height
-                val resized = Bitmap.createScaledBitmap(bitmap, INPUT_SIZE, INPUT_SIZE, true)
+                // Letterbox: uniform scale + black padding right/bottom,
+                // same preprocessing as OpenCV FaceDetectorYN (no aspect distortion)
+                val scale = minOf(
+                    INPUT_SIZE.toFloat() / bitmap.width,
+                    INPUT_SIZE.toFloat() / bitmap.height
+                )
+                val scaledW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+                val scaledH = (bitmap.height * scale).toInt().coerceAtLeast(1)
 
-                Log.d(TAG, "INPUT: bitmap=${bitmap.width}x${bitmap.height}, scaleX=$scaleX, scaleY=$scaleY")
+                val letterboxed = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(letterboxed)
+                canvas.drawColor(android.graphics.Color.BLACK)
+                canvas.drawBitmap(bitmap, null, Rect(0, 0, scaledW, scaledH), Paint(Paint.FILTER_BITMAP_FLAG))
 
-                val floatBuffer = bitmapToFloatBuffer(resized)
+                val floatBuffer = bitmapToFloatBuffer(letterboxed)
                 val inputName = session.inputNames.iterator().next()
                 val shape = longArrayOf(1, 3, INPUT_SIZE.toLong(), INPUT_SIZE.toLong())
                 val inputTensor = OnnxTensor.createTensor(ortEnv, floatBuffer, shape)
                 val results = session.run(Collections.singletonMap(inputName, inputTensor))
 
-                val candidates = decodeOutputs(results, bitmap.width.toFloat(), bitmap.height.toFloat(), scaleX, scaleY)
+                val candidates = decodeOutputs(results, bitmap.width.toFloat(), bitmap.height.toFloat(), scale)
 
                 inputTensor.close()
                 results.close()
-                if (resized != bitmap) resized.recycle()
+                letterboxed.recycle()
 
                 val after = nms(candidates)
                 Log.d(TAG, "RESULT: ${candidates.size} candidates -> ${after.size} after NMS")
-                for ((idx, f) in after.withIndex()) {
-                    Log.d(TAG, "  face[$idx]: box=[${f.box[0].toInt()},${f.box[1].toInt()},${f.box[2].toInt()},${f.box[3].toInt()}] conf=${f.confidence}")
-                }
                 return@withContext after
             } catch (e: Exception) {
                 Log.e(TAG, "detectFaces failed: ${e.message}", e)
@@ -92,8 +103,7 @@ class FaceDetector(private val context: Context) {
         results: OrtSession.Result,
         bmpW: Float,
         bmpH: Float,
-        scaleX: Float,
-        scaleY: Float
+        scale: Float
     ): List<FaceDetection> {
 
         val cls = Array(3) { i ->
@@ -116,8 +126,10 @@ class FaceDetector(private val context: Context) {
             val numAnchors = cls[strideIdx].size
 
             for (i in 0 until numAnchors) {
-                // cls and obj are already sigmoid — multiply directly
-                val conf = cls[strideIdx][i][0] * obj[strideIdx][i][0]
+                // OpenCV FaceDetectorYN score: sqrt(cls * obj), both clamped to [0,1]
+                val clsScore = cls[strideIdx][i][0].coerceIn(0f, 1f)
+                val objScore = obj[strideIdx][i][0].coerceIn(0f, 1f)
+                val conf = sqrt(clsScore * objScore)
 
                 if (conf < CONFIDENCE_THRESHOLD) {
                     anchorIdx++
@@ -126,20 +138,21 @@ class FaceDetector(private val context: Context) {
 
                 val anchor = anchorCache[anchorIdx]
 
+                // OpenCV decode: cx = (col + dx) * stride — anchor sits at col*stride, no +0.5
                 val cx = anchor.cx + bbox[strideIdx][i][0] * anchor.size
                 val cy = anchor.cy + bbox[strideIdx][i][1] * anchor.size
                 val w = exp(bbox[strideIdx][i][2]) * anchor.size
                 val h = exp(bbox[strideIdx][i][3]) * anchor.size
 
-                // Map back to original bitmap coordinates
-                val left = ((cx - w / 2f) / scaleX).coerceIn(0f, bmpW)
-                val top = ((cy - h / 2f) / scaleY).coerceIn(0f, bmpH)
-                val right = ((cx + w / 2f) / scaleX).coerceIn(0f, bmpW)
-                val bottom = ((cy + h / 2f) / scaleY).coerceIn(0f, bmpH)
+                // Map back to original bitmap coordinates (single letterbox scale)
+                val left = ((cx - w / 2f) / scale).coerceIn(0f, bmpW)
+                val top = ((cy - h / 2f) / scale).coerceIn(0f, bmpH)
+                val right = ((cx + w / 2f) / scale).coerceIn(0f, bmpW)
+                val bottom = ((cy + h / 2f) / scale).coerceIn(0f, bmpH)
 
                 val boxW = right - left
                 val boxH = bottom - top
-                if (boxW < 30f || boxH < 30f) {
+                if (boxW < MIN_FACE_SIZE || boxH < MIN_FACE_SIZE) {
                     anchorIdx++
                     continue
                 }
@@ -148,8 +161,8 @@ class FaceDetector(private val context: Context) {
                 for (j in 0 until 5) {
                     val lx = anchor.cx + kps[strideIdx][i][2 * j] * anchor.size
                     val ly = anchor.cy + kps[strideIdx][i][2 * j + 1] * anchor.size
-                    landmarks[2 * j] = (lx / scaleX).coerceIn(0f, bmpW)
-                    landmarks[2 * j + 1] = (ly / scaleY).coerceIn(0f, bmpH)
+                    landmarks[2 * j] = (lx / scale).coerceIn(0f, bmpW)
+                    landmarks[2 * j + 1] = (ly / scale).coerceIn(0f, bmpH)
                 }
 
                 candidates.add(
@@ -174,11 +187,11 @@ class FaceDetector(private val context: Context) {
             val gridW = INPUT_SIZE / stride
             for (row in 0 until gridH) {
                 for (col in 0 until gridW) {
-                    // 1 anchor per position, stride as size
+                    // Anchor at cell origin: OpenCV decodes cx = (col + dx) * stride
                     anchors.add(
                         Anchor(
-                            cx = (col + 0.5f) * stride,
-                            cy = (row + 0.5f) * stride,
+                            cx = col * stride.toFloat(),
+                            cy = row * stride.toFloat(),
                             size = stride.toFloat()
                         )
                     )

@@ -1,13 +1,12 @@
 package com.florea_gabriel.impairedhelpapp.presentation.money
 
 import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.util.Log
 import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
@@ -37,6 +36,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import com.florea_gabriel.impairedhelpapp.data.model.Detection
 import com.florea_gabriel.impairedhelpapp.ml.detector.MoneyDetector
+import com.florea_gabriel.impairedhelpapp.ml.processor.ImageProcessor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -139,11 +139,15 @@ fun MoneyDetectionScreen(
                         lastProcessTime = now
 
                         try {
-                            val bitmap = imageProxyToBitmap(imageProxy)
+                            val bitmap = try {
+                                ImageProcessor.imageProxyToBitmap(imageProxy)
+                            } catch (e: Exception) {
+                                null
+                            }
                             if (bitmap != null) {
                                 previewWidth = bitmap.width
                                 previewHeight = bitmap.height
-                                val results = detector.detect(bitmap, bitmap.width, bitmap.height)
+                                val results = detector.detect(bitmap)
                                 currentDetections = results
                                 bitmap.recycle()
 
@@ -212,16 +216,36 @@ fun MoneyDetectionScreen(
                     // Guard: don't bind if screen was already disposed during async provider fetch
                     if (!isActive.get()) return@addListener
 
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            imageAnalysis
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Camera bind error: ${e.message}")
+                    // Bind after layout so previewView.viewPort is available: a shared
+                    // ViewPort crops the analysis stream to exactly the region the
+                    // preview displays (WYSIWYG) — otherwise boxes drift near edges
+                    previewView.post {
+                        if (!isActive.get()) return@post
+                        try {
+                            cameraProvider.unbindAll()
+                            val viewPort = previewView.viewPort
+                            if (viewPort != null) {
+                                val group = UseCaseGroup.Builder()
+                                    .setViewPort(viewPort)
+                                    .addUseCase(preview)
+                                    .addUseCase(imageAnalysis)
+                                    .build()
+                                cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    group
+                                )
+                            } else {
+                                cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    preview,
+                                    imageAnalysis
+                                )
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Camera bind error: ${e.message}")
+                        }
                     }
                 }, ContextCompat.getMainExecutor(ctx))
 
@@ -454,56 +478,4 @@ private fun formatValue(value: Int): String {
  */
 private fun formatLabel(label: String): String {
     return label.replace("_", " ").uppercase()
-}
-
-/**
- * Convert ImageProxy (YUV_420_888) to Bitmap.
- */
-private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
-    try {
-        val yBuffer = imageProxy.planes[0].buffer
-        val uBuffer = imageProxy.planes[1].buffer
-        val vBuffer = imageProxy.planes[2].buffer
-
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
-
-        val yuvImage = android.graphics.YuvImage(
-            nv21,
-            android.graphics.ImageFormat.NV21,
-            imageProxy.width,
-            imageProxy.height,
-            null
-        )
-
-        val out = java.io.ByteArrayOutputStream()
-        yuvImage.compressToJpeg(
-            android.graphics.Rect(0, 0, imageProxy.width, imageProxy.height),
-            85,
-            out
-        )
-
-        val bytes = out.toByteArray()
-        val bitmap = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-
-        val rotation = imageProxy.imageInfo.rotationDegrees
-        if (rotation != 0) {
-            val matrix = Matrix()
-            matrix.postRotate(rotation.toFloat())
-            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            bitmap.recycle()
-            return rotated
-        }
-
-        return bitmap
-    } catch (e: Exception) {
-        Log.e(TAG, "Bitmap conversion error: ${e.message}")
-        return null
-    }
 }

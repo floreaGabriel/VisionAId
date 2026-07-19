@@ -15,6 +15,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
@@ -243,7 +244,7 @@ fun FaceRegistrationScreen(
             val box = lastFaceBox
             val landmarks = lastLandmarks
 
-            if (bitmap != null && box != null && faceDetected) {
+            if (bitmap != null && !bitmap.isRecycled && box != null && faceDetected) {
                 val yaw = if (landmarks != null) estimateYaw(landmarks) else 0f
                 val bucket = angleToBucket(yaw)
 
@@ -252,18 +253,15 @@ fun FaceRegistrationScreen(
                 if (shouldCapture) {
                     val fw = box[2] - box[0]
                     val fh = box[3] - box[1]
-                    val padX = (fw * 0.15f).toInt()
-                    val padY = (fh * 0.15f).toInt()
-                    val cropLeft = (box[0].toInt() - padX).coerceAtLeast(0)
-                    val cropTop = (box[1].toInt() - padY).coerceAtLeast(0)
-                    val cropRight = (box[2].toInt() + padX).coerceAtMost(bitmap.width)
-                    val cropBottom = (box[3].toInt() + padY).coerceAtMost(bitmap.height)
-                    val cw = cropRight - cropLeft
-                    val ch = cropBottom - cropTop
 
-                    if (cw > 80 && ch > 80) {
-                        val faceCrop = Bitmap.createBitmap(bitmap, cropLeft, cropTop, cw, ch)
-                        val embedding = embedder.extractEmbedding(faceCrop)
+                    // Quality gate: face must be large enough for a useful embedding
+                    if (fw > 60 && fh > 60) {
+                        // Own a stable copy BEFORE suspending: the camera analyzer
+                        // recycles lastBitmap whenever a new frame arrives
+                        val frameCopy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+
+                        // Same aligned-embedding path as live recognition
+                        val embedding = embedder.extractAlignedEmbedding(frameCopy, box, landmarks)
                         if (embedding != null) {
                             collectedEmbeddings.add(embedding)
                             if (!coveredBuckets.contains(bucket)) {
@@ -272,9 +270,7 @@ fun FaceRegistrationScreen(
                             scanProgress = coveredBuckets.size.toFloat() / NUM_BUCKETS
 
                             if (bestThumbnail == null && bucket == NUM_BUCKETS / 2) {
-                                bestThumbnail = faceCrop
-                            } else {
-                                faceCrop.recycle()
+                                bestThumbnail = cropFaceThumbnail(frameCopy, box)
                             }
 
                             Log.d(TAG, "Scan: emb=${collectedEmbeddings.size}, bucket=$bucket, yaw=${"%.1f".format(yaw)}, buckets=${coveredBuckets.size}/$NUM_BUCKETS")
@@ -282,9 +278,8 @@ fun FaceRegistrationScreen(
                             // Update status with progress
                             val pct = (coveredBuckets.size * 100 / NUM_BUCKETS)
                             statusMessage = "Scanare: $pct% — rotește capul"
-                        } else {
-                            faceCrop.recycle()
                         }
+                        frameCopy.recycle()
                     }
                 }
             }
@@ -470,16 +465,36 @@ fun FaceRegistrationScreen(
 
                     if (!isActive.get()) return@addListener
 
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_FRONT_CAMERA,
-                            preview,
-                            imageAnalysis
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Camera bind error: ${e.message}")
+                    // Bind after layout so previewView.viewPort is available: a shared
+                    // ViewPort crops the analysis stream to exactly the region the
+                    // preview displays (WYSIWYG)
+                    previewView.post {
+                        if (!isActive.get()) return@post
+                        try {
+                            cameraProvider.unbindAll()
+                            val viewPort = previewView.viewPort
+                            if (viewPort != null) {
+                                val group = UseCaseGroup.Builder()
+                                    .setViewPort(viewPort)
+                                    .addUseCase(preview)
+                                    .addUseCase(imageAnalysis)
+                                    .build()
+                                cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                                    group
+                                )
+                            } else {
+                                cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_FRONT_CAMERA,
+                                    preview,
+                                    imageAnalysis
+                                )
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Camera bind error: ${e.message}")
+                        }
                     }
                 }, ContextCompat.getMainExecutor(ctx))
 
@@ -744,6 +759,21 @@ fun FaceRegistrationScreen(
             }.start()
         }
     }
+}
+
+private fun cropFaceThumbnail(bitmap: Bitmap, box: FloatArray): Bitmap? {
+    val fw = box[2] - box[0]
+    val fh = box[3] - box[1]
+    val padX = (fw * FaceEmbedder.CROP_PADDING).toInt()
+    val padY = (fh * FaceEmbedder.CROP_PADDING).toInt()
+    val left = (box[0].toInt() - padX).coerceAtLeast(0)
+    val top = (box[1].toInt() - padY).coerceAtLeast(0)
+    val right = (box[2].toInt() + padX).coerceAtMost(bitmap.width)
+    val bottom = (box[3].toInt() + padY).coerceAtMost(bitmap.height)
+    val cw = right - left
+    val ch = bottom - top
+    if (cw < 20 || ch < 20) return null
+    return Bitmap.createBitmap(bitmap, left, top, cw, ch)
 }
 
 private fun estimateYaw(landmarks: FloatArray): Float {

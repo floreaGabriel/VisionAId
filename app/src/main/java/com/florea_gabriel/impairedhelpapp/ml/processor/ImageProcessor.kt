@@ -1,13 +1,9 @@
 package com.florea_gabriel.impairedhelpapp.ml.processor
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Rect
-import android.graphics.YuvImage
 import androidx.camera.core.ImageProxy
-import java.io.ByteArrayOutputStream
 
 /**
  * ImageProcessor: Helper functions for image conversion and preprocessing
@@ -15,33 +11,65 @@ import java.io.ByteArrayOutputStream
 object ImageProcessor {
 
     /**
-     * Convert ImageProxy (YUV) to Bitmap (RGB)
+     * Convert ImageProxy (YUV_420_888) to an upright Bitmap (ARGB).
+     * Direct YUV→RGB conversion — no YuvImage/JPEG round-trip.
+     * Honors imageProxy.cropRect: when the camera is bound with a shared
+     * ViewPort, the returned bitmap contains exactly the region shown
+     * by the preview (WYSIWYG).
      */
     fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
-        val yBuffer = imageProxy.planes[0].buffer
-        val uBuffer = imageProxy.planes[1].buffer
-        val vBuffer = imageProxy.planes[2].buffer
-
-        val ySize = yBuffer.remaining()
-        val uSize = uBuffer.remaining()
-        val vSize = vBuffer.remaining()
-
-        val nv21 = ByteArray(ySize + uSize + vSize)
-
-        // U and V are swapped
-        yBuffer.get(nv21, 0, ySize)
-        vBuffer.get(nv21, ySize, vSize)
-        uBuffer.get(nv21, ySize + vSize, uSize)
-
-        val yuvImage = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
-        val out = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
-        val imageBytes = out.toByteArray()
-
-        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-
-        // Rotate bitmap to match device orientation
+        val bitmap = yuv420ToBitmap(imageProxy, imageProxy.cropRect)
         return rotateBitmap(bitmap, imageProxy.imageInfo.rotationDegrees.toFloat())
+    }
+
+    /**
+     * Direct YUV_420_888 → ARGB conversion honoring row/pixel strides.
+     * BT.601 full-range coefficients (matches the previous JPEG path).
+     */
+    private fun yuv420ToBitmap(imageProxy: ImageProxy, crop: Rect): Bitmap {
+        val width = crop.width()
+        val height = crop.height()
+
+        val yPlane = imageProxy.planes[0]
+        val uPlane = imageProxy.planes[1]
+        val vPlane = imageProxy.planes[2]
+
+        val yBytes = ByteArray(yPlane.buffer.remaining()).also { yPlane.buffer.get(it) }
+        val uBytes = ByteArray(uPlane.buffer.remaining()).also { uPlane.buffer.get(it) }
+        val vBytes = ByteArray(vPlane.buffer.remaining()).also { vPlane.buffer.get(it) }
+
+        val yRowStride = yPlane.rowStride
+        val yPixelStride = yPlane.pixelStride
+        val uvRowStride = uPlane.rowStride
+        val uvPixelStride = uPlane.pixelStride
+
+        val argb = IntArray(width * height)
+        var outIdx = 0
+
+        for (row in crop.top until crop.bottom) {
+            val yRowOffset = row * yRowStride
+            val uvRowOffset = (row shr 1) * uvRowStride
+
+            for (col in crop.left until crop.right) {
+                val y = yBytes[yRowOffset + col * yPixelStride].toInt() and 0xFF
+                val uvOffset = uvRowOffset + (col shr 1) * uvPixelStride
+                val u = (uBytes[uvOffset].toInt() and 0xFF) - 128
+                val v = (vBytes[uvOffset].toInt() and 0xFF) - 128
+
+                // Fixed-point BT.601: R = Y + 1.402V, G = Y - 0.344U - 0.714V, B = Y + 1.772U
+                var r = y + ((1436 * v) shr 10)
+                var g = y - ((352 * u + 731 * v) shr 10)
+                var b = y + ((1815 * u) shr 10)
+
+                if (r < 0) r = 0 else if (r > 255) r = 255
+                if (g < 0) g = 0 else if (g > 255) g = 255
+                if (b < 0) b = 0 else if (b > 255) b = 255
+
+                argb[outIdx++] = -0x1000000 or (r shl 16) or (g shl 8) or b
+            }
+        }
+
+        return Bitmap.createBitmap(argb, width, height, Bitmap.Config.ARGB_8888)
     }
 
     /**
@@ -54,6 +82,8 @@ object ImageProcessor {
             postRotate(degrees)
         }
 
-        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+        if (rotated != bitmap) bitmap.recycle()
+        return rotated
     }
 }

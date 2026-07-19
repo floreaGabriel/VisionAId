@@ -6,6 +6,7 @@ import android.util.Size
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
@@ -201,7 +202,7 @@ fun LiveFaceRecognitionScreen(
 
                                         if (frames > 5) {
                                             // Stale → re-embed (async, don't block detection)
-                                            val result = embedAndMatch(bitmap, det.box, embedder, cachedPersons)
+                                            val result = embedAndMatch(bitmap, det, embedder, cachedPersons)
                                             newTracked.add(
                                                 TrackedFace(prev.id, det.box, result?.first, result?.second ?: 0f, 0)
                                             )
@@ -211,7 +212,7 @@ fun LiveFaceRecognitionScreen(
                                         }
                                     } else {
                                         // New face → embed immediately
-                                        val result = embedAndMatch(bitmap, det.box, embedder, cachedPersons)
+                                        val result = embedAndMatch(bitmap, det, embedder, cachedPersons)
                                         newTracked.add(
                                             TrackedFace(nextFaceId++, det.box, result?.first, result?.second ?: 0f, 0)
                                         )
@@ -236,16 +237,36 @@ fun LiveFaceRecognitionScreen(
                     // Guard: don't bind if screen was already disposed during async provider fetch
                     if (!isActive.get()) return@addListener
 
-                    try {
-                        cameraProvider.unbindAll()
-                        cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            imageAnalysis
-                        )
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Camera bind error: ${e.message}")
+                    // Bind after layout so previewView.viewPort is available: a shared
+                    // ViewPort crops the analysis stream to exactly the region the
+                    // preview displays (WYSIWYG) — otherwise boxes drift near edges
+                    previewView.post {
+                        if (!isActive.get()) return@post
+                        try {
+                            cameraProvider.unbindAll()
+                            val viewPort = previewView.viewPort
+                            if (viewPort != null) {
+                                val group = UseCaseGroup.Builder()
+                                    .setViewPort(viewPort)
+                                    .addUseCase(preview)
+                                    .addUseCase(imageAnalysis)
+                                    .build()
+                                cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    group
+                                )
+                            } else {
+                                cameraProvider.bindToLifecycle(
+                                    lifecycleOwner,
+                                    CameraSelector.DEFAULT_BACK_CAMERA,
+                                    preview,
+                                    imageAnalysis
+                                )
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Camera bind error: ${e.message}")
+                        }
                     }
                 }, ContextCompat.getMainExecutor(ctx))
 
@@ -394,68 +415,26 @@ fun LiveFaceRecognitionScreen(
 
 private suspend fun embedAndMatch(
     bitmap: Bitmap,
-    box: FloatArray,
+    detection: FaceDetector.FaceDetection,
     embedder: FaceEmbedder,
     cachedPersons: List<CachedPerson>
 ): Pair<String, Float>? {
-    val fw = box[2] - box[0]
-    val fh = box[3] - box[1]
-    val padX = (fw * 0.2f).toInt()
-    val padY = (fh * 0.2f).toInt()
-    val cropLeft = (box[0].toInt() - padX).coerceAtLeast(0)
-    val cropTop = (box[1].toInt() - padY).coerceAtLeast(0)
-    val cropRight = (box[2].toInt() + padX).coerceAtMost(bitmap.width)
-    val cropBottom = (box[3].toInt() + padY).coerceAtMost(bitmap.height)
-    val cw = cropRight - cropLeft
-    val ch = cropBottom - cropTop
-
-    if (cw < 20 || ch < 20) return null
-
-    val faceCrop = Bitmap.createBitmap(bitmap, cropLeft, cropTop, cw, ch)
-
-    // DEBUG: save face crop to disk to inspect quality
-    try {
-        val debugDir = java.io.File(bitmap.let { android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES) }, "face_debug")
-        debugDir.mkdirs()
-        val file = java.io.File(debugDir, "crop_${System.currentTimeMillis()}.jpg")
-        java.io.FileOutputStream(file).use { out ->
-            faceCrop.compress(Bitmap.CompressFormat.JPEG, 95, out)
-        }
-        Log.d(TAG, "DEBUG: saved face crop to ${file.absolutePath}")
-    } catch (e: Exception) {
-        Log.w(TAG, "DEBUG: couldn't save crop: ${e.message}")
-    }
-
-    val embedding = embedder.extractEmbedding(faceCrop)
-    faceCrop.recycle()
-
-    if (embedding == null) return null
-
-    // Diagnostic: log first 5 values of live embedding
-    Log.d(TAG, "LIVE emb first 5: [${embedding[0]}, ${embedding[1]}, ${embedding[2]}, ${embedding[3]}, ${embedding[4]}]")
+    val embedding = embedder.extractAlignedEmbedding(bitmap, detection.box, detection.landmarks)
+        ?: return null
 
     var bestName: String? = null
     var bestSim = FaceEmbedder.RECOGNITION_THRESHOLD
 
     for (cached in cachedPersons) {
-        var maxSimForPerson = 0f
-        // Log first 5 values of first stored embedding (once per person)
-        if (cached.embeddings.isNotEmpty()) {
-            val stored = cached.embeddings[0]
-            Log.d(TAG, "STORED '${cached.person.name}' emb[0] first 5: [${stored[0]}, ${stored[1]}, ${stored[2]}, ${stored[3]}, ${stored[4]}]")
-        }
         for (emb in cached.embeddings) {
             val sim = embedder.cosineSimilarity(embedding, emb)
-            if (sim > maxSimForPerson) maxSimForPerson = sim
             if (sim > bestSim) {
                 bestSim = sim
                 bestName = cached.person.name
             }
         }
-        Log.d(TAG, "Match vs '${cached.person.name}': maxSim=$maxSimForPerson (threshold=${FaceEmbedder.RECOGNITION_THRESHOLD})")
     }
 
-    Log.d(TAG, "Best match: name=$bestName, sim=$bestSim, cropSize=${cw}x${ch}")
     return if (bestName != null) Pair(bestName, bestSim) else null
 }
 

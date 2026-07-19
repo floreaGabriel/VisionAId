@@ -2,6 +2,9 @@ package com.florea_gabriel.impairedhelpapp.ml.detector
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.graphics.RectF
 import android.util.Log
 import ai.onnxruntime.OnnxTensor
@@ -99,14 +102,41 @@ class MoneyDetector(private val context: Context) {
         }
     }
 
+    private data class Letterbox(val scale: Float, val dx: Float, val dy: Float)
+
     /**
-     * Preprocess bitmap: resize to 640x640, normalize /255, NCHW format.
+     * Ultralytics-style letterbox: uniform scale + centered gray (114) padding.
+     * Matches the preprocessing the model was trained/exported with — no
+     * aspect-ratio distortion.
      */
-    private fun preprocessBitmap(bitmap: Bitmap): FloatBuffer {
-        val resized = Bitmap.createScaledBitmap(bitmap, inputSize, inputSize, true)
+    private fun letterbox(bitmap: Bitmap): Pair<Bitmap, Letterbox> {
+        val scale = minOf(
+            inputSize.toFloat() / bitmap.width,
+            inputSize.toFloat() / bitmap.height
+        )
+        val scaledW = (bitmap.width * scale).toInt().coerceAtLeast(1)
+        val scaledH = (bitmap.height * scale).toInt().coerceAtLeast(1)
+        val dx = (inputSize - scaledW) / 2f
+        val dy = (inputSize - scaledH) / 2f
+
+        val out = Bitmap.createBitmap(inputSize, inputSize, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.rgb(114, 114, 114))
+        canvas.drawBitmap(
+            bitmap, null,
+            RectF(dx, dy, dx + scaledW, dy + scaledH),
+            Paint(Paint.FILTER_BITMAP_FLAG)
+        )
+        return out to Letterbox(scale, dx, dy)
+    }
+
+    /**
+     * Convert a 640x640 letterboxed bitmap to NCHW float buffer, normalized /255.
+     */
+    private fun bitmapToBuffer(bitmap: Bitmap): FloatBuffer {
         val buffer = FloatBuffer.allocate(1 * 3 * inputSize * inputSize)
         val pixels = IntArray(inputSize * inputSize)
-        resized.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
+        bitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
 
         // NCHW: channels first (R, G, B)
         for (c in 0 until 3) {
@@ -122,24 +152,23 @@ class MoneyDetector(private val context: Context) {
             }
         }
         buffer.rewind()
-
-        if (resized != bitmap) resized.recycle()
         return buffer
     }
 
     /**
      * Run detection on a bitmap.
      * @param bitmap Input camera frame
-     * @param srcWidth Original frame width (for scaling bounding boxes)
-     * @param srcHeight Original frame height (for scaling bounding boxes)
-     * @return List of detections with bounding boxes in original image coordinates
+     * @return List of detections with bounding boxes in original frame coordinates
      */
-    fun detect(bitmap: Bitmap, srcWidth: Int, srcHeight: Int): List<Detection> {
+    fun detect(bitmap: Bitmap): List<Detection> {
         val session = ortSession ?: return emptyList()
         val env = ortEnvironment ?: return emptyList()
 
         try {
-            val inputBuffer = preprocessBitmap(bitmap)
+            val (letterboxed, lb) = letterbox(bitmap)
+            val inputBuffer = bitmapToBuffer(letterboxed)
+            letterboxed.recycle()
+
             val inputShape = longArrayOf(1, 3, inputSize.toLong(), inputSize.toLong())
             val inputTensor = OnnxTensor.createTensor(env, inputBuffer, inputShape)
             val inputName = session.inputNames.first()
@@ -153,11 +182,8 @@ class MoneyDetector(private val context: Context) {
                 return emptyList()
             }
 
-            // Diagnostic: log the model's output tensor shape once per call
-            Log.d(TAG, "Output tensor shape: ${outputTensor.info.shape.contentToString()}")
-
             val output = outputTensor.floatBuffer
-            val detections = parseOutput(output, srcWidth, srcHeight)
+            val detections = parseOutput(output, bitmap.width, bitmap.height, lb)
             results.close()
 
             val finalDetections = nms(detections, IOU_THRESHOLD)
@@ -173,17 +199,19 @@ class MoneyDetector(private val context: Context) {
     /**
      * Parse YOLO end-to-end (NMS-included) output, shape [1, 300, 6].
      * Each of the up-to-300 rows is already NMS-filtered: [x1, y1, x2, y2, score, classId].
-     * Box coordinates are in the model input space (0..inputSize), so we scale them
-     * back to the original frame.
+     * Box coordinates are in the model input space (0..inputSize); undo the
+     * letterbox (padding offset + uniform scale) to get original frame coordinates.
      */
-    private fun parseOutput(buffer: FloatBuffer, srcWidth: Int, srcHeight: Int): List<Detection> {
+    private fun parseOutput(
+        buffer: FloatBuffer,
+        srcWidth: Int,
+        srcHeight: Int,
+        lb: Letterbox
+    ): List<Detection> {
         buffer.rewind()
 
         val maxDets = 300
         val stride = 6   // x1, y1, x2, y2, score, classId
-
-        val scaleX = srcWidth.toFloat() / inputSize
-        val scaleY = srcHeight.toFloat() / inputSize
 
         val detections = mutableListOf<Detection>()
         var globalMaxScore = 0f  // diagnostic: highest score seen this frame
@@ -209,10 +237,10 @@ class MoneyDetector(private val context: Context) {
                     label = label,
                     confidence = score,
                     boundingBox = RectF(
-                        (x1 * scaleX).coerceAtLeast(0f),
-                        (y1 * scaleY).coerceAtLeast(0f),
-                        (x2 * scaleX).coerceAtMost(srcWidth.toFloat()),
-                        (y2 * scaleY).coerceAtMost(srcHeight.toFloat())
+                        ((x1 - lb.dx) / lb.scale).coerceIn(0f, srcWidth.toFloat()),
+                        ((y1 - lb.dy) / lb.scale).coerceIn(0f, srcHeight.toFloat()),
+                        ((x2 - lb.dx) / lb.scale).coerceIn(0f, srcWidth.toFloat()),
+                        ((y2 - lb.dy) / lb.scale).coerceIn(0f, srcHeight.toFloat())
                     )
                 )
             )
